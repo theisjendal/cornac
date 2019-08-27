@@ -25,6 +25,7 @@ from .conv_mf import ConvMF
 from .ctr import CTR
 from .cvae import CVAE
 from .efm import EFM
+from .efm_ext import EFMExt
 from .global_avg import GlobalAvg
 from .hft import HFT
 from .hpf import HPF
