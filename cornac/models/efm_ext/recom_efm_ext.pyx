@@ -18,7 +18,7 @@
 cimport cython
 from cython.parallel import prange, parallel
 from cython cimport floating, integral, bint
-from libc.math cimport sqrt
+from libc.math cimport sqrt, log, exp
 from scipy.linalg.cython_blas cimport sdot, ddot
 from ...exception import ScoreException
 from ...utils.common import intersects
@@ -38,6 +38,10 @@ cdef floating _dot(int n, floating *x, int incx,
         return sdot(&n, x, &incx, y, &incy)
     else:
         return ddot(&n, x, &incx, y, &incy)
+
+
+cdef floating _sigmoid(floating x) nogil:
+    return 1. / (1 + exp(-x))
 
 
 class EFMExt(Recommender):
@@ -260,7 +264,7 @@ class EFMExt(Recommender):
             floating lambda_v = self.lambda_v
             floating lambda_d = self.lambda_d
 
-            floating prediction, score, score_i, score_j, loss
+            floating prediction, score, score_i, score_j, loss, diff, grad
 
             np.ndarray[np.float32_t, ndim=2] U1_numerator = np.empty((num_users, num_explicit_factors), dtype=np.float32)
             np.ndarray[np.float32_t, ndim=2] U1_denominator = np.empty((num_users, num_explicit_factors), dtype=np.float32)
@@ -300,12 +304,14 @@ class EFMExt(Recommender):
                         score_i = _dot(num_explicit_factors, &U2[i, 0], 1, &V[k, 0], 1)
                         score_j = _dot(num_explicit_factors, &U2[j, 0], 1, &V[k, 0], 1)
                         if (model_type == FINER_MODEL) or ((model_type == DOM_MODEL) and (score_i < score_j)) or ((model_type == AROUND_MODEL) and (score_i > score_j)):
-                            loss += lambda_d * (score_i - score_j)
+                            diff = score_j - score_i
+                            loss -= lambda_d * log(_sigmoid(diff))
+                            grad = exp(-diff) * _sigmoid(diff)
                             for f in range(num_explicit_factors):
-                                U2_denominator[i, f] += lambda_d * V[k, f] + lambda_u * U2[i, f]
-                                U2_numerator[j, f] += lambda_d * V[k, f]
-                                V_denominator[k, f] += lambda_d * U2[i, f] + lambda_v * V[k, f]
-                                V_numerator[k, f] += lambda_d * U2[j, f]
+                                U2_denominator[i, f] += lambda_d * grad * V[k, f] + lambda_u * U2[i, f]
+                                U2_numerator[j, f] += lambda_d * grad * V[k, f]
+                                V_denominator[k, f] += lambda_d * grad * U2[i, f] + lambda_v * V[k, f]
+                                V_numerator[k, f] += lambda_d * grad * U2[j, f]
 
                 for idx in prange(A.shape[0]):
                     i = A_uids[idx]
