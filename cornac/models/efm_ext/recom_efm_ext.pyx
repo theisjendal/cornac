@@ -27,7 +27,8 @@ from collections import Counter, OrderedDict
 import scipy.sparse as sp
 import numpy as np
 cimport numpy as np
-
+from itertools import combinations
+from time import time
 
 MODEL_TYPES = {"Dominant": 0, "Finer": 1, "Around": 2}
 
@@ -186,7 +187,7 @@ class EFMExt(Recommender):
         if not self.trainable:
             return
 
-        A, X, Y, D = self._build_matrices(self.train_set)
+        A, X, Y, earlier_indices, later_indices = self._build_matrices(self.train_set)
         A_user_counts = np.ediff1d(A.indptr)
         A_item_counts = np.ediff1d(A.tocsc().indptr)
         A_uids = np.repeat(np.arange(self.train_set.num_users), A_user_counts).astype(A.indices.dtype)
@@ -196,14 +197,12 @@ class EFMExt(Recommender):
         Y_item_counts = np.ediff1d(Y.indptr)
         Y_aspect_counts = np.ediff1d(Y.tocsc().indptr)
         Y_iids = np.repeat(np.arange(self.train_set.num_items), Y_item_counts).astype(Y.indices.dtype)
-        D_item_counts = np.ediff1d(D.indptr)
-        D_iids_earlier = np.repeat(np.arange(self.train_set.num_items), D_item_counts).astype(D.indices.dtype)
 
         self._fit_efm(self.num_threads,
                       A.data.astype(np.float32), A_uids, A.indices, A_user_counts, A_item_counts,
                       X.data.astype(np.float32), X_uids, X.indices, X_user_counts, X_aspect_counts,
                       Y.data.astype(np.float32), Y_iids, Y.indices, Y_item_counts, Y_aspect_counts,
-                      D_iids_earlier, D.indices,
+                      earlier_indices, later_indices,
                       self.U1, self.U2, self.V, self.H1, self.H2)
 
     def _init_params(self):
@@ -241,7 +240,7 @@ class EFMExt(Recommender):
                  floating[:] A, integral[:] A_uids, integral[:] A_iids, integral[:] A_user_counts, integral[:] A_item_counts,
                  floating[:] X, integral[:] X_uids, integral[:] X_aids, integral[:] X_user_counts, integral[:] X_aspect_counts,
                  floating[:] Y, integral[:] Y_iids, integral[:] Y_aids, integral[:] Y_item_counts, integral[:] Y_aspect_counts,
-                 integral[:] D_iids_earlier, integral[:] D_iids_later,
+                 integral[:] earlier_indices, integral[:] later_indices,
                  floating[:, :] U1, floating[:, :] U2, floating[:, :] V, floating[:, :] H1, floating[:, :] H2):
         """Fit the model parameters (U1, U2, V, H1, H2)
         """
@@ -297,9 +296,9 @@ class EFMExt(Recommender):
 
             with nogil, parallel(num_threads=num_threads):
                 # compute numerators and denominators for all factors
-                for idx in prange(D_iids_earlier.shape[0]):
-                    i = D_iids_earlier[idx]
-                    j = D_iids_later[idx]
+                for idx in prange(earlier_indices.shape[0]):
+                    i = earlier_indices[idx]
+                    j = later_indices[idx]
                     for k in prange(num_aspects):
                         score_i = _dot(num_explicit_factors, &U2[i, 0], 1, &V[k, 0], 1)
                         score_j = _dot(num_explicit_factors, &U2[j, 0], 1, &V[k, 0], 1)
@@ -414,11 +413,14 @@ class EFMExt(Recommender):
                              + _dot(num_latent_factors, &H1[i, 0], 1, &H2[j, 0], 1)
                 score = A[idx]
                 loss += (prediction - score) * (prediction - score)
+
         if self.verbose:
             print('loss:', loss)
+
         return loss
 
     def _build_rating_matrix(self, data_set):
+        start_time = time()
         ratings = []
         map_uid = []
         map_iid = []
@@ -435,15 +437,32 @@ class EFMExt(Recommender):
         map_iid = np.asarray(map_iid, dtype=np.int).flatten()
         rating_matrix = sp.csr_matrix((ratings, (map_uid, map_iid)),
                                       shape=(self.train_set.num_users, self.train_set.num_items))
+
         if self.verbose:
-            print('Building rating matrix completed!')
+            print('Building rating matrix completed in %d s' % (time() - start_time))
 
         return rating_matrix
 
-    def _build_matrices(self, data_set):
-        sentiment = self.train_set.sentiment
-        A = self._build_rating_matrix(data_set)
+    def _build_chrono_purchased_pairs(self, data_set):
+        start_time = time()
+        earlier_indices = []
+        later_indices = []
+        for (item_ids, *_) in data_set.chrono_user_data.values():
+            for earlier_item_idx, later_item_idx in combinations(item_ids, 2):
+                if self.train_set.is_unk_item(earlier_item_idx) or self.train_set.is_unk_item(later_item_idx):
+                    continue
+                earlier_indices.append(earlier_item_idx)
+                later_indices.append(later_item_idx)
+        earlier_indices = np.asarray(earlier_indices, dtype=np.int32).flatten()
+        later_indices = np.asarray(later_indices, dtype=np.int32).flatten()
 
+        if self.verbose:
+            print('Building chrono purchared items pairs completed in %d s' % (time() - start_time))
+
+        return earlier_indices, later_indices
+
+    def _build_user_attention_matrix(self, data_set, sentiment):
+        start_time = time()
         attention_scores = []
         map_uid = []
         map_aspect_id = []
@@ -459,11 +478,18 @@ class EFMExt(Recommender):
                 map_uid.append(uid)
                 map_aspect_id.append(aid)
         attention_scores = np.asarray(attention_scores, dtype=np.float).flatten()
-        map_uid = np.asarray(map_uid, dtype=np.int).flatten()
+        map_uid = np.asarray(map_uid, dtype=np.int32).flatten()
         map_aspect_id = np.asarray(map_aspect_id, dtype=np.int).flatten()
         X = sp.csr_matrix((attention_scores, (map_uid, map_aspect_id)),
                           shape=(self.train_set.num_users, sentiment.num_aspects))
 
+        if self.verbose:
+            print('Building user aspect attention matrix completed in %d s' % (time() - start_time))
+
+        return X
+
+    def _build_item_quality_matrix(self, data_set, sentiment):
+        start_time = time()
         quality_scores = []
         map_iid = []
         map_aspect_id = []
@@ -492,34 +518,22 @@ class EFMExt(Recommender):
         Y = sp.csr_matrix((quality_scores, (map_iid, map_aspect_id)),
                           shape=(self.train_set.num_items, sentiment.num_aspects))
 
-        u_indices = data_set.uirt_tuple[0]
-        i_indices = data_set.uirt_tuple[1]
-        t_values = data_set.uirt_tuple[3]
-        purchased_sequences = {}
-        for idx in t_values.argsort():
-            purchased_sequences.setdefault(u_indices[idx], []).append(i_indices[idx])
+        if self.verbose:
+            print('Building item aspect quality matrix completed in %d s' % (time() - start_time))
 
-        from itertools import combinations
-        map_iid_earlier = []
-        map_iid_later = []
-        purchased_pairs = set() # to avoid duplicates
-        for purchase_sequence in purchased_sequences.values():
-            for earlier_item, later_item in combinations(purchase_sequence, 2):
-                if self.train_set.is_unk_item(earlier_item) or self.train_set.is_unk_item(later_item):
-                    continue
-                if (earlier_item, later_item) not in purchased_pairs:
-                    purchased_pairs.add((earlier_item, later_item))
-                    map_iid_earlier.append(earlier_item)
-                    map_iid_later.append(later_item)
-        map_iid_earlier = np.asarray(map_iid_earlier, dtype=np.int).flatten()
-        map_iid_later = np.asarray(map_iid_later, dtype=np.int).flatten()
-        D = sp.csr_matrix((np.ones(len(map_iid_earlier)), (map_iid_earlier, map_iid_later)),
-                        shape=(self.train_set.num_items, self.train_set.num_items))
+        return Y
+
+    def _build_matrices(self, data_set):
+        sentiment = self.train_set.sentiment
+        A = self._build_rating_matrix(data_set)
+        X = self._build_user_attention_matrix(data_set, sentiment)
+        Y = self._build_item_quality_matrix(data_set, sentiment)
+        earlier_indices, later_indices = self._build_chrono_purchased_pairs(data_set)
 
         if self.verbose:
             print('Building matrices completed!')
 
-        return A, X, Y, D
+        return A, X, Y, earlier_indices, later_indices
 
     def _compute_attention_score(self, count):
         return 1 + (self.rating_scale - 1) * (2 / (1 + np.exp(-count)) - 1)
