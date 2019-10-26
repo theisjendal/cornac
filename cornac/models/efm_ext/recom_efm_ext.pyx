@@ -83,6 +83,10 @@ class EFMExt(Recommender):
     use_item_aspect_popularity: boolean, optional, default: True
         When False, item aspect quality score computation omits item aspect frequency out of its formular.
 
+    min_user_freq: int, optional, default: 2
+        Apply constraint for user with minimum number of ratings, \
+        where `min_user_freq = 2` means only apply constraints on users with at least 2 ratings.
+
     max_iter: int, optional, default: 100
         Maximum number of iterations or the number of epochs.
 
@@ -129,7 +133,9 @@ class EFMExt(Recommender):
                  num_explicit_factors=40, num_latent_factors=60, num_most_cared_aspects=15,
                  rating_scale=5.0, alpha=0.85,
                  lambda_x=1, lambda_y=1, lambda_u=0.01, lambda_h=0.01, lambda_v=0.01, lambda_d=0.01,
-                 use_item_aspect_popularity=True, max_iter=100,
+                 use_item_aspect_popularity=True,
+                 min_user_freq=2,
+                 max_iter=100,
                  num_threads=0,
                  early_stopping=None, trainable=True, verbose=False, init_params=None, seed=None):
 
@@ -146,6 +152,7 @@ class EFMExt(Recommender):
         self.lambda_h = lambda_h
         self.lambda_v = lambda_v
         self.lambda_d = lambda_d
+        self.min_user_freq = min_user_freq
         self.use_item_aspect_popularity = use_item_aspect_popularity
         self.max_iter = max_iter
         self.early_stopping = early_stopping
@@ -448,11 +455,12 @@ class EFMExt(Recommender):
         earlier_indices = []
         later_indices = []
         for (item_ids, *_) in data_set.chrono_user_data.values():
-            for earlier_item_idx, later_item_idx in combinations(item_ids, 2):
-                if self.train_set.is_unk_item(earlier_item_idx) or self.train_set.is_unk_item(later_item_idx):
-                    continue
-                earlier_indices.append(earlier_item_idx)
-                later_indices.append(later_item_idx)
+            if len(item_ids) >= self.min_user_freq:
+                for earlier_item_idx, later_item_idx in combinations(item_ids, 2):
+                    if self.train_set.is_unk_item(earlier_item_idx) or self.train_set.is_unk_item(later_item_idx):
+                        continue
+                    earlier_indices.append(earlier_item_idx)
+                    later_indices.append(later_item_idx)
         earlier_indices = np.asarray(earlier_indices, dtype=np.int32).flatten()
         later_indices = np.asarray(later_indices, dtype=np.int32).flatten()
 
