@@ -87,6 +87,14 @@ class EFMExt(Recommender):
         Apply constraint for user with minimum number of ratings, \
         where `min_user_freq = 2` means only apply constraints on users with at least 2 ratings.
 
+    min_pair_freq: int, optional, default: 1
+        Apply constraint for the purchased pairs (earlier-later bought) with minimum number of pairs, \
+        where `min_pair_freq = 2` means only apply constraints on pairs appear at least twice.
+
+    max_pair_freq: int, optional, default: 1e9
+        Apply constraint for the purchased pairs with frequency at most `max_pair_freq`, \
+        where `max_pair_freq = 2` means only apply constraints on pairs appear at most twice.
+
     max_iter: int, optional, default: 100
         Maximum number of iterations or the number of epochs.
 
@@ -135,6 +143,8 @@ class EFMExt(Recommender):
                  lambda_x=1, lambda_y=1, lambda_u=0.01, lambda_h=0.01, lambda_v=0.01, lambda_d=0.01,
                  use_item_aspect_popularity=True,
                  min_user_freq=2,
+                 min_pair_freq=1,
+                 max_pair_freq=1e9,
                  max_iter=100,
                  num_threads=0,
                  early_stopping=None, trainable=True, verbose=False, init_params=None, seed=None):
@@ -153,6 +163,8 @@ class EFMExt(Recommender):
         self.lambda_v = lambda_v
         self.lambda_d = lambda_d
         self.min_user_freq = min_user_freq
+        self.min_pair_freq = min_pair_freq
+        self.max_pair_freq = max_pair_freq
         self.use_item_aspect_popularity = use_item_aspect_popularity
         self.max_iter = max_iter
         self.early_stopping = early_stopping
@@ -194,7 +206,7 @@ class EFMExt(Recommender):
         if not self.trainable:
             return
 
-        A, X, Y, earlier_indices, later_indices = self._build_matrices(self.train_set)
+        (A, X, Y, earlier_indices, later_indices, purchared_pair_counts) = self._build_matrices(self.train_set)
         A_user_counts = np.ediff1d(A.indptr)
         A_item_counts = np.ediff1d(A.tocsc().indptr)
         A_uids = np.repeat(np.arange(self.train_set.num_users), A_user_counts).astype(A.indices.dtype)
@@ -209,7 +221,7 @@ class EFMExt(Recommender):
                       A.data.astype(np.float32), A_uids, A.indices, A_user_counts, A_item_counts,
                       X.data.astype(np.float32), X_uids, X.indices, X_user_counts, X_aspect_counts,
                       Y.data.astype(np.float32), Y_iids, Y.indices, Y_item_counts, Y_aspect_counts,
-                      earlier_indices, later_indices,
+                      earlier_indices, later_indices, purchared_pair_counts,
                       self.U1, self.U2, self.V, self.H1, self.H2)
 
     def _init_params(self):
@@ -247,7 +259,7 @@ class EFMExt(Recommender):
                  floating[:] A, integral[:] A_uids, integral[:] A_iids, integral[:] A_user_counts, integral[:] A_item_counts,
                  floating[:] X, integral[:] X_uids, integral[:] X_aids, integral[:] X_user_counts, integral[:] X_aspect_counts,
                  floating[:] Y, integral[:] Y_iids, integral[:] Y_aids, integral[:] Y_item_counts, integral[:] Y_aspect_counts,
-                 integral[:] earlier_indices, integral[:] later_indices,
+                 integral[:] earlier_indices, integral[:] later_indices, integral[:] purchared_pair_counts,
                  floating[:, :] U1, floating[:, :] U2, floating[:, :] V, floating[:, :] H1, floating[:, :] H2):
         """Fit the model parameters (U1, U2, V, H1, H2)
         """
@@ -262,6 +274,8 @@ class EFMExt(Recommender):
             long num_aspects = self.train_set.sentiment.num_aspects
             int num_explicit_factors = self.num_explicit_factors
             int num_latent_factors = self.num_latent_factors
+            int min_pair_freq = self.min_pair_freq
+            int max_pair_freq = self.max_pair_freq
 
             floating lambda_x = self.lambda_x
             floating lambda_y = self.lambda_y
@@ -303,21 +317,23 @@ class EFMExt(Recommender):
 
             with nogil, parallel(num_threads=num_threads):
                 # compute numerators and denominators for all factors
-                for idx in prange(earlier_indices.shape[0]):
+                for idx in prange(purchared_pair_counts.shape[0]):
                     i = earlier_indices[idx]
                     j = later_indices[idx]
+                    if purchared_pair_counts[idx] < min_pair_freq or purchared_pair_counts[idx] > max_pair_freq:
+                        continue
                     for k in prange(num_aspects):
                         score_i = _dot(num_explicit_factors, &U2[i, 0], 1, &V[k, 0], 1)
                         score_j = _dot(num_explicit_factors, &U2[j, 0], 1, &V[k, 0], 1)
                         if (model_type == FINER_MODEL) or ((model_type == DOM_MODEL) and (score_i < score_j)) or ((model_type == AROUND_MODEL) and (score_i > score_j)):
                             diff = score_j - score_i
-                            loss -= lambda_d * log(_sigmoid(diff))
+                            loss -= lambda_d * log(_sigmoid(diff)) * purchared_pair_counts[idx]
                             grad = exp(-diff) * _sigmoid(diff)
                             for f in range(num_explicit_factors):
-                                U2_denominator[i, f] += lambda_d * grad * V[k, f] + lambda_u * U2[i, f]
-                                U2_numerator[j, f] += lambda_d * grad * V[k, f]
-                                V_denominator[k, f] += lambda_d * grad * U2[i, f] + lambda_v * V[k, f]
-                                V_numerator[k, f] += lambda_d * grad * U2[j, f]
+                                U2_denominator[i, f] += purchared_pair_counts[idx] * (lambda_d * grad * V[k, f] + lambda_u * U2[i, f])
+                                U2_numerator[j, f] += purchared_pair_counts[idx] * lambda_d * grad * V[k, f]
+                                V_denominator[k, f] += purchared_pair_counts[idx] * (lambda_d * grad * U2[i, f] + lambda_v * V[k, f])
+                                V_numerator[k, f] += purchared_pair_counts[idx] * lambda_d * grad * U2[j, f]
 
                 for idx in prange(A.shape[0]):
                     i = A_uids[idx]
@@ -452,22 +468,29 @@ class EFMExt(Recommender):
 
     def _build_chrono_purchased_pairs(self, data_set):
         start_time = time()
-        earlier_indices = []
-        later_indices = []
+        chrono_purchased_pairs = Counter()
         for (item_ids, *_) in data_set.chrono_user_data.values():
             if len(item_ids) >= self.min_user_freq:
                 for earlier_item_idx, later_item_idx in combinations(item_ids, 2):
                     if self.train_set.is_unk_item(earlier_item_idx) or self.train_set.is_unk_item(later_item_idx):
                         continue
-                    earlier_indices.append(earlier_item_idx)
-                    later_indices.append(later_item_idx)
+                    chrono_purchased_pairs[(earlier_item_idx, later_item_idx)] += 1
+
+        earlier_indices, later_indices, purchared_pair_counts = [], [], []
+        for (earlier_item_idx, later_item_idx), count in chrono_purchased_pairs.most_common():
+            earlier_indices.append(earlier_item_idx)
+            later_indices.append(later_item_idx)
+            purchared_pair_counts.append(count)
+
         earlier_indices = np.asarray(earlier_indices, dtype=np.int32).flatten()
         later_indices = np.asarray(later_indices, dtype=np.int32).flatten()
+        purchared_pair_counts = np.asarray(purchared_pair_counts, dtype=np.int32).flatten()
 
         if self.verbose:
             print('Building chrono purchared items pairs completed in %d s' % (time() - start_time))
+            print('Statistics: # pairs >= %d = %d, min(%.2f), max(%.2f), avg(%.2f)' % (self.min_pair_freq, purchared_pair_counts[purchared_pair_counts>=self.min_pair_freq].shape[0], purchared_pair_counts.min(), purchared_pair_counts.max(), purchared_pair_counts.mean()))
 
-        return earlier_indices, later_indices
+        return earlier_indices, later_indices, purchared_pair_counts
 
     def _build_user_attention_matrix(self, data_set, sentiment):
         start_time = time()
@@ -536,12 +559,12 @@ class EFMExt(Recommender):
         A = self._build_rating_matrix(data_set)
         X = self._build_user_attention_matrix(data_set, sentiment)
         Y = self._build_item_quality_matrix(data_set, sentiment)
-        earlier_indices, later_indices = self._build_chrono_purchased_pairs(data_set)
+        earlier_indices, later_indices, purchared_pair_counts = self._build_chrono_purchased_pairs(data_set)
 
         if self.verbose:
             print('Building matrices completed!')
 
-        return A, X, Y, earlier_indices, later_indices
+        return A, X, Y, earlier_indices, later_indices, purchared_pair_counts
 
     def _compute_attention_score(self, count):
         return 1 + (self.rating_scale - 1) * (2 / (1 + np.exp(-count)) - 1)
