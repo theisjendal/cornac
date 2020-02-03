@@ -145,6 +145,8 @@ class EFMExt(Recommender):
                  min_user_freq=2,
                  min_pair_freq=1,
                  max_pair_freq=1e9,
+                 enum_window=None,
+                 use_item_pair_popularity=True,
                  max_iter=100,
                  num_threads=0,
                  early_stopping=None, trainable=True, verbose=False, init_params=None, seed=None):
@@ -165,7 +167,9 @@ class EFMExt(Recommender):
         self.min_user_freq = min_user_freq
         self.min_pair_freq = min_pair_freq
         self.max_pair_freq = max_pair_freq
+        self.enum_window = enum_window
         self.use_item_aspect_popularity = use_item_aspect_popularity
+        self.use_item_pair_popularity = use_item_pair_popularity
         self.max_iter = max_iter
         self.early_stopping = early_stopping
         self.init_params = {} if init_params is None else init_params
@@ -268,6 +272,7 @@ class EFMExt(Recommender):
             int FINER_MODEL = MODEL_TYPES["Finer"]
             int DOM_MODEL = MODEL_TYPES["Dominant"]
             int AROUND_MODEL = MODEL_TYPES["Around"]
+            int t_count = 1
 
             long num_users = self.train_set.num_users
             long num_items = self.train_set.num_items
@@ -276,6 +281,7 @@ class EFMExt(Recommender):
             int num_latent_factors = self.num_latent_factors
             int min_pair_freq = self.min_pair_freq
             int max_pair_freq = self.max_pair_freq
+            bint use_item_pair_popularity = self.use_item_pair_popularity
 
             floating lambda_x = self.lambda_x
             floating lambda_y = self.lambda_y
@@ -327,13 +333,16 @@ class EFMExt(Recommender):
                         score_j = _dot(num_explicit_factors, &U2[j, 0], 1, &V[k, 0], 1)
                         if (model_type == FINER_MODEL) or ((model_type == DOM_MODEL) and (score_i < score_j)) or ((model_type == AROUND_MODEL) and (score_i > score_j)):
                             diff = score_j - score_i
-                            loss -= lambda_d * log(_sigmoid(diff)) * purchared_pair_counts[idx]
-                            grad = exp(-diff) * _sigmoid(diff)
+                            t_count = 1
+                            if use_item_pair_popularity:
+                                t_count = purchared_pair_counts[idx] 
+                            loss -= lambda_d * t_count * log(_sigmoid(diff))
+                            grad = t_count * exp(-diff) * _sigmoid(diff)
                             for f in range(num_explicit_factors):
-                                U2_denominator[i, f] += purchared_pair_counts[idx] * (lambda_d * grad * V[k, f] + lambda_u * U2[i, f])
-                                U2_numerator[j, f] += purchared_pair_counts[idx] * lambda_d * grad * V[k, f]
-                                V_denominator[k, f] += purchared_pair_counts[idx] * (lambda_d * grad * U2[i, f] + lambda_v * V[k, f])
-                                V_numerator[k, f] += purchared_pair_counts[idx] * lambda_d * grad * U2[j, f]
+                                U2_denominator[i, f] += lambda_d * grad * V[k, f]
+                                U2_numerator[j, f] += lambda_d * grad * V[k, f]
+                                V_denominator[k, f] += lambda_d * grad * U2[i, f]
+                                V_numerator[k, f] += lambda_d * grad * U2[j, f]
 
                 for idx in prange(A.shape[0]):
                     i = A_uids[idx]
@@ -471,10 +480,12 @@ class EFMExt(Recommender):
         chrono_purchased_pairs = Counter()
         for (item_ids, *_) in data_set.chrono_user_data.values():
             if len(item_ids) >= self.min_user_freq:
-                for earlier_item_idx, later_item_idx in combinations(item_ids, 2):
-                    if self.train_set.is_unk_item(earlier_item_idx) or self.train_set.is_unk_item(later_item_idx):
-                        continue
-                    chrono_purchased_pairs[(earlier_item_idx, later_item_idx)] += 1
+                window = len(item_ids) if self.enum_window is None else min(self.enum_window, len(item_ids))
+                for sub_item_ids in [item_ids[i:i+window] for i in range(len(item_ids) - window + 1)]:
+                    for earlier_item_idx, later_item_idx in combinations(sub_item_ids, 2):
+                        if self.train_set.is_unk_item(earlier_item_idx) or self.train_set.is_unk_item(later_item_idx):
+                            continue
+                        chrono_purchased_pairs[(earlier_item_idx, later_item_idx)] += 1
 
         earlier_indices, later_indices, purchared_pair_counts = [], [], []
         for (earlier_item_idx, later_item_idx), count in chrono_purchased_pairs.most_common():
