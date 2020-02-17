@@ -1,4 +1,4 @@
-Built-in datasets
+Built-in Datasets
 =================
 
 
@@ -28,6 +28,11 @@ CiteULike
 Epinions
 -----------------------------------------
 .. automodule:: cornac.datasets.epinions
+   :members:
+
+FilmTrust
+---------------------------------------------
+.. automodule:: cornac.datasets.filmtrust
    :members:
 
 MovieLens

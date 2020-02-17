@@ -35,7 +35,7 @@ Collaborative Variational Autoencoder (CVAE)
 .. automodule:: cornac.models.cvae.recom_cvae
    :members:
 
-Generalized Matrix Factorization (NeuMF)
+Generalized Matrix Factorization (GMF)
 -----------------------------------------
 .. automodule:: cornac.models.ncf.recom_gmf
    :members:
@@ -55,7 +55,7 @@ Multi-Layer Perceptron (MLP)
 .. automodule:: cornac.models.ncf.recom_mlp
    :members:
 
-Neural Matrix Factorization (NeuMF)
+Neural Matrix Factorization (NeuMF/NCF)
 ----------------------------------------------
 .. automodule:: cornac.models.ncf.recom_neumf
    :members:
@@ -120,6 +120,11 @@ Hidden Factors and Hidden Topics (HFT)
 .. automodule:: cornac.models.hft.recom_hft
    :members:
 
+Weighted Bayesian Personalized Ranking (WBPR)
+------------------------------------------------
+.. autoclass:: cornac.models.bpr.recom_wbpr.WBPR
+   :members:
+
 Collaborative Topic Modeling (CTR)
 -------------------------------------------
 .. automodule:: cornac.models.ctr.recom_ctr
@@ -143,6 +148,11 @@ Global Average (GlobalAvg)
 Matrix Factorization (MF)
 ------------------------------------------
 .. automodule:: cornac.models.mf.recom_mf
+   :members:
+
+Maximum Margin Matrix Factorization (MMMF)
+---------------------------------------------
+.. automodule:: cornac.models.mmmf.recom_mmmf
    :members:
 
 Most Popular (MostPop)

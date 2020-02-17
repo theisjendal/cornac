@@ -13,10 +13,14 @@
 # limitations under the License.
 # ============================================================================
 
+# cython: language_level=3
+
 from libc.math cimport exp
 from libc.math cimport sqrt
 
 import numpy as np
+from ...utils.init_utils import normal
+from ...utils import get_rng
 
 
 #Sigmoid function
@@ -35,7 +39,7 @@ cdef float sigmoid(float z):
 
 def sorec(int[:] rat_uid, int[:] rat_iid, float[:] rat_val, int[:] net_uid, int[:] net_jid, float[:] net_val,int k,
         int n_users, int n_items, int n_ratings, int n_edges, int n_epochs = 100, float lamda_c = 10, float lamda = 0.001,
-        float learning_rate = 0.001, float gamma = 0.9, init_params = None, verbose = False):
+        float learning_rate = 0.001, float gamma = 0.9, init_params = None, verbose = False, seed=None):
 
     cdef:
         double[:] loss = np.full(n_epochs, 0.0)
@@ -55,27 +59,23 @@ def sorec(int[:] rat_uid, int[:] rat_iid, float[:] rat_val, int[:] net_uid, int[
         double val, s, e, norm_u, norm_v
 
 
-    # Initialize user factors
-    if init_params['U'] is None:
-       U = np.random.normal(loc=0.0, scale=0.001, size=n * k).reshape(n, k)
-    else:
-       U = init_params['U']
+    # Initialize factors
+    rng = get_rng(seed)
 
-    # Initialize item factors
-    if init_params['V'] is None:
-        V = np.random.normal(loc=0.0, scale=0.001, size=d * k).reshape(d, k)
-    else:
-        V = init_params['V']
-
-    # Initialize social network factors
-    if init_params['Z'] is None:
-        Z = np.random.normal(loc=0.0, scale=0.001, size=n * k).reshape(n, k)
-    else:
-        Z = init_params['Z']
+    U = init_params.get('U', None)
+    if U is None:
+        U = normal((n, k), mean=0.0, std=0.001, random_state=rng, dtype=np.double)
+    
+    V = init_params.get('V', None)
+    if V is None:
+        V = normal((d, k), mean=0.0, std=0.001, random_state=rng, dtype=np.double)
+    
+    Z = init_params.get('Z', None)
+    if Z is None:
+        Z = normal((d, k), mean=0.0, std=0.001, random_state=rng, dtype=np.double)
 
 
-
-# Optimization
+    # Optimization
     for epoch in range(n_epochs):
 
         for ed in range(n_edges):

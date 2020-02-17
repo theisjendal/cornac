@@ -27,18 +27,19 @@ class RankingMetric:
     name: string, default: None
         Name of the measure.
 
-    k: int, optional, default: -1 (all)
+    k: int or list, optional, default: -1 (all)
         The number of items in the top@k list.
         If None, all items will be considered.
 
     """
 
-    def __init__(self, name=None, k=-1):
-        assert k == -1 or k > 0
+    def __init__(self, name=None, k=-1, higher_better=True):
+        assert hasattr(k, '__len__') or k == -1 or k > 0
 
         self.type = 'ranking'
         self.name = name
         self.k = k
+        self.higher_better = higher_better
 
     def compute(self, **kwargs):
         raise NotImplementedError()
@@ -49,7 +50,7 @@ class NDCG(RankingMetric):
 
     Parameters
     ----------
-    k: int, optional, default: -1 (all)
+    k: int or list, optional, default: -1 (all)
         The number of items in the top@k list.
         If None, all items will be considered.
 
@@ -126,7 +127,7 @@ class NCRR(RankingMetric):
 
     Parameters
     ----------
-    k: int, optional, default: -1 (all)
+    k: int or list, optional, default: -1 (all)
         The number of items in the top@k list.
         If None, all items will be considered.
 
@@ -163,11 +164,14 @@ class NCRR(RankingMetric):
 
         # Compute CRR
         rec_rank = np.where(np.in1d(truncated_pd_rank, gt_pos_items))[0]
+        if len(rec_rank) == 0:
+            return 0.0
         rec_rank = rec_rank + 1  # +1 because indices starts from 0 in python
         crr = np.sum(1. / rec_rank)
 
         # Compute Ideal CRR
-        ideal_rank = np.arange(len(rec_rank))
+        max_nb_pos = min(len(gt_pos_items[0]),len(truncated_pd_rank))
+        ideal_rank = np.arange(max_nb_pos)
         ideal_rank = ideal_rank + 1  # +1 because indices starts from 0 in python
         icrr = np.sum(1. / ideal_rank)
 
@@ -179,12 +183,6 @@ class NCRR(RankingMetric):
 
 class MRR(RankingMetric):
     """Mean Reciprocal Rank.
-
-    Parameters
-    ----------
-    k: int, optional, default: -1 (all)
-        The number of items in the top@k list.
-        If None, all items will be considered.
 
     References
     ----------
@@ -228,7 +226,7 @@ class MeasureAtK(RankingMetric):
 
     Attributes
     ----------
-    k: int, optional, default: -1 (all)
+    k: int or list, optional, default: -1 (all)
         The number of items in the top@k list.
         If None, all items will be considered.
 
@@ -282,7 +280,7 @@ class Precision(MeasureAtK):
 
     Parameters
     ----------
-    k: int, optional, default: -1 (all)
+    k: int or list, optional, default: -1 (all)
         The number of items in the top@k list.
         If None, all items will be considered.
 
@@ -319,7 +317,7 @@ class Recall(MeasureAtK):
 
     Parameters
     ----------
-    k: int, optional, default: -1 (all)
+    k: int or list, optional, default: -1 (all)
         The number of items in the top@k list.
         If None, all items will be considered.
 
@@ -352,11 +350,11 @@ class Recall(MeasureAtK):
 
 
 class FMeasure(MeasureAtK):
-    """F-measure@K@.
+    """F-measure@K.
 
     Parameters
     ----------
-    k: int, optional, default: -1 (all)
+    k: int or list, optional, default: -1 (all)
         The number of items in the top@k list.
         If None, all items will be considered.
 

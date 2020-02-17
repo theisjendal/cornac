@@ -19,6 +19,9 @@ from ..recommender import Recommender
 from ...exception import CornacException
 from ...exception import ScoreException
 from ...utils import fast_dot
+from ...utils.common import intersects
+from ...utils import get_rng
+from ...utils.init_utils import zeros, xavier_uniform
 
 
 class VBPR(Recommender):
@@ -72,11 +75,23 @@ class VBPR(Recommender):
     * He, R., & McAuley, J. (2016). VBPR: Visual Bayesian Personalized Ranking from Implicit Feedback.
     """
 
-    def __init__(self, name='VBPR', k=10, k2=10,
-                 n_epochs=50, batch_size=100, learning_rate=0.005,
-                 lambda_w=0.01, lambda_b=0.01, lambda_e=0.0,
-                 use_gpu=False, trainable=True, verbose=True,
-                 init_params=None, seed=None):
+    def __init__(
+        self,
+        name="VBPR",
+        k=10,
+        k2=10,
+        n_epochs=50,
+        batch_size=100,
+        learning_rate=0.005,
+        lambda_w=0.01,
+        lambda_b=0.01,
+        lambda_e=0.0,
+        use_gpu=False,
+        trainable=True,
+        verbose=True,
+        init_params=None,
+        seed=None,
+    ):
         super().__init__(name=name, trainable=trainable, verbose=verbose)
         self.k = k
         self.k2 = k2
@@ -87,20 +102,32 @@ class VBPR(Recommender):
         self.lambda_b = lambda_b
         self.lambda_e = lambda_e
         self.use_gpu = use_gpu
-        self.init_params = {} if init_params is None else init_params
         self.seed = seed
 
-    def _init_factors(self, n_users, n_items, features):
-        from ...utils import get_rng
-        from ...utils.init_utils import zeros, xavier_uniform
+        # Init params if provided
+        self.init_params = {} if init_params is None else init_params
+        self.beta_item = self.init_params.get("Bi", None)
+        self.gamma_user = self.init_params.get("Gu", None)
+        self.gamma_item = self.init_params.get("Gi", None)
+        self.theta_user = self.init_params.get("Tu", None)
+        self.emb_matrix = self.init_params.get("E", None)
+        self.beta_prime = self.init_params.get("Bp", None)
 
+    def _init(self, n_users, n_items, features):
         rng = get_rng(self.seed)
-        self.beta_item = self.init_params.get('Bi', zeros(n_items))
-        self.gamma_user = self.init_params.get('Gu', xavier_uniform((n_users, self.k), rng))
-        self.gamma_item = self.init_params.get('Gi', xavier_uniform((n_items, self.k), rng))
-        self.theta_user = self.init_params.get('Tu', xavier_uniform((n_users, self.k2), rng))
-        self.emb_matrix = self.init_params.get('E', xavier_uniform((features.shape[1], self.k2), rng))
-        self.beta_prime = self.init_params.get('Bp', xavier_uniform((features.shape[1], 1), rng))
+
+        self.beta_item = zeros(n_items) if self.beta_item is None else self.beta_item
+        if self.gamma_user is None:
+            self.gamma_user = xavier_uniform((n_users, self.k), rng)
+        if self.gamma_item is None:
+            self.gamma_item = xavier_uniform((n_items, self.k), rng)
+        if self.theta_user is None:
+            self.theta_user = xavier_uniform((n_users, self.k2), rng)
+        if self.emb_matrix is None:
+            self.emb_matrix = xavier_uniform((features.shape[1], self.k2), rng)
+        if self.beta_prime is None:
+            self.beta_prime = xavier_uniform((features.shape[1], 1), rng)
+
         # pre-computed for faster evaluation
         self.theta_item = np.matmul(features, self.emb_matrix)
         self.visual_bias = np.matmul(features, self.beta_prime).ravel()
@@ -123,13 +150,16 @@ class VBPR(Recommender):
         Recommender.fit(self, train_set, val_set)
 
         if train_set.item_image is None:
-            raise CornacException('item_image modality is required but None.')
+            raise CornacException("item_image modality is required but None.")
 
         # Item visual feature from CNN
-        train_features = train_set.item_image.features[:self.train_set.num_items].astype(np.float32)
-        self._init_factors(n_users=train_set.num_users,
-                           n_items=train_set.num_items,
-                           features=train_features)
+        train_features = train_set.item_image.features[: self.train_set.total_items]
+        train_features = train_features.astype(np.float32)
+        self._init(
+            n_users=train_set.total_users,
+            n_items=train_set.total_items,
+            features=train_features,
+        )
 
         if self.trainable:
             self._fit_torch(train_features)
@@ -150,27 +180,46 @@ class VBPR(Recommender):
             return (a * b).sum(dim=1)
 
         dtype = torch.float
-        device = torch.device("cuda:0") if (self.use_gpu and torch.cuda.is_available()) \
+        device = (
+            torch.device("cuda:0")
+            if (self.use_gpu and torch.cuda.is_available())
             else torch.device("cpu")
+        )
 
         F = torch.tensor(train_features, device=device, dtype=dtype)
         # Learned parameters
-        Bi = torch.tensor(self.beta_item, device=device, dtype=dtype, requires_grad=True)
-        Gu = torch.tensor(self.gamma_user, device=device, dtype=dtype, requires_grad=True)
-        Gi = torch.tensor(self.gamma_item, device=device, dtype=dtype, requires_grad=True)
-        Tu = torch.tensor(self.theta_user, device=device, dtype=dtype, requires_grad=True)
-        E = torch.tensor(self.emb_matrix, device=device, dtype=dtype, requires_grad=True)
-        Bp = torch.tensor(self.beta_prime, device=device, dtype=dtype, requires_grad=True)
+        Bi = torch.tensor(
+            self.beta_item, device=device, dtype=dtype, requires_grad=True
+        )
+        Gu = torch.tensor(
+            self.gamma_user, device=device, dtype=dtype, requires_grad=True
+        )
+        Gi = torch.tensor(
+            self.gamma_item, device=device, dtype=dtype, requires_grad=True
+        )
+        Tu = torch.tensor(
+            self.theta_user, device=device, dtype=dtype, requires_grad=True
+        )
+        E = torch.tensor(
+            self.emb_matrix, device=device, dtype=dtype, requires_grad=True
+        )
+        Bp = torch.tensor(
+            self.beta_prime, device=device, dtype=dtype, requires_grad=True
+        )
 
         optimizer = torch.optim.Adam([Bi, Gu, Gi, Tu, E, Bp], lr=self.learning_rate)
 
         for epoch in range(1, self.n_epochs + 1):
-            sum_loss = 0.
+            sum_loss = 0.0
             count = 0
-            progress_bar = tqdm(total=self.train_set.num_batches(self.batch_size),
-                                desc='Epoch {}/{}'.format(epoch, self.n_epochs),
-                                disable=not self.verbose)
-            for batch_u, batch_i, batch_j in self.train_set.uij_iter(self.batch_size, shuffle=True):
+            progress_bar = tqdm(
+                total=self.train_set.num_batches(self.batch_size),
+                desc="Epoch {}/{}".format(epoch, self.n_epochs),
+                disable=not self.verbose,
+            )
+            for batch_u, batch_i, batch_j in self.train_set.uij_iter(
+                self.batch_size, shuffle=True
+            ):
                 gamma_u = Gu[batch_u]
                 theta_u = Tu[batch_u]
 
@@ -184,19 +233,24 @@ class VBPR(Recommender):
                 gamma_diff = gamma_i - gamma_j
                 feat_diff = feat_i - feat_j
 
-                Xuij = beta_i - beta_j \
-                       + _inner(gamma_u, gamma_diff) \
-                       + _inner(theta_u, feat_diff.mm(E)) \
-                       + feat_diff.mm(Bp)
+                Xuij = (
+                    beta_i
+                    - beta_j
+                    + _inner(gamma_u, gamma_diff)
+                    + _inner(theta_u, feat_diff.mm(E))
+                    + feat_diff.mm(Bp)
+                )
 
                 log_likelihood = torch.nn.functional.logsigmoid(Xuij).sum()
 
-                reg = _l2_loss(gamma_u, gamma_i, gamma_j, theta_u) * self.lambda_w \
-                      + _l2_loss(beta_i) * self.lambda_b \
-                      + _l2_loss(beta_j) * self.lambda_b / 10 \
-                      + _l2_loss(E, Bp) * self.lambda_e
+                reg = (
+                    _l2_loss(gamma_u, gamma_i, gamma_j, theta_u) * self.lambda_w
+                    + _l2_loss(beta_i) * self.lambda_b
+                    + _l2_loss(beta_j) * self.lambda_b / 10
+                    + _l2_loss(E, Bp) * self.lambda_e
+                )
 
-                loss = - log_likelihood + reg
+                loss = -log_likelihood + reg
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -209,13 +263,14 @@ class VBPR(Recommender):
                 progress_bar.update(1)
             progress_bar.close()
 
-        print('Optimization finished!')
+        print("Optimization finished!")
 
         self.beta_item = Bi.data.cpu().numpy()
         self.gamma_user = Gu.data.cpu().numpy()
         self.gamma_item = Gi.data.cpu().numpy()
         self.theta_user = Tu.data.cpu().numpy()
         self.emb_matrix = E.data.cpu().numpy()
+        self.beta_prime = Bp.data.cpu().numpy()
         # pre-computed for faster evaluation
         self.theta_item = F.mm(E).data.cpu().numpy()
         self.visual_bias = F.mm(Bp).data.cpu().numpy().ravel()
@@ -240,16 +295,11 @@ class VBPR(Recommender):
         """
         if item_idx is None:
             known_item_scores = np.add(self.beta_item, self.visual_bias)
-            if not self.train_set.is_unk_user(user_idx):
-                fast_dot(self.gamma_user[user_idx], self.gamma_item, known_item_scores)
-                fast_dot(self.theta_user[user_idx], self.theta_item, known_item_scores)
+            fast_dot(self.gamma_user[user_idx], self.gamma_item, known_item_scores)
+            fast_dot(self.theta_user[user_idx], self.theta_item, known_item_scores)
             return known_item_scores
         else:
-            if self.train_set.is_unk_item(item_idx):
-                raise ScoreException("Can't make score prediction for (item_id=%d)" % item_idx)
-
             item_score = np.add(self.beta_item[item_idx], self.visual_bias[item_idx])
-            if not self.train_set.is_unk_user(user_idx):
-                item_score += np.dot(self.gamma_item[item_idx], self.gamma_user[user_idx])
-                item_score += np.dot(self.theta_item[item_idx], self.theta_user[user_idx])
+            item_score += np.dot(self.gamma_item[item_idx], self.gamma_user[user_idx])
+            item_score += np.dot(self.theta_item[item_idx], self.theta_user[user_idx])
             return item_score
